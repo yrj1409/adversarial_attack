@@ -297,14 +297,19 @@ class Nattack(Attacker):
 
 
 class DIM(Attacker):
-    def __init__(self, eps, steps, momentum, clip_min=0.0, clip_max=1.0, device=torch.device('cpu'), low=200, high=224):
+    def __init__(self, eps, steps, step_size, momentum, prob=0.5, clip_min=0.0, clip_max=1.0, device=torch.device('cpu'), low=200,
+                 high=224):
         super(DIM, self).__init__(eps=eps, clip_min=clip_min, clip_max=clip_max, device=device)
-        self.steps = steps
-        self.step_size = eps / steps
+        if steps == 0:
+            self.steps = int(min(eps * 255 + 4, eps * 255 * 1.25))
+        else:
+            self.steps = steps
+        self.step_size = step_size
         self.momentum = momentum
         self.loss_func = F.cross_entropy
         self.low = low
         self.high = high
+        self.prob = prob
 
     def generate(self, model: nn.Module, x: torch.Tensor, y: torch.Tensor, mean=(0.485, 0.456, 0.406),
                  std=(0.229, 0.224, 0.225)) -> torch.Tensor:
@@ -320,7 +325,7 @@ class DIM(Attacker):
 
         g = 0
         for i in range(self.steps):
-            adv_diversity = utils.input_diversity(adv_t, prob=0.9, low=self.low, high=self.high)
+            adv_diversity = utils.input_diversity(adv_t, prob=self.prob, low=self.low, high=self.high)
             adv_normalize = (adv_diversity - mean) / std
             out = model(adv_normalize)
             loss = self.loss_func(out, ny)
