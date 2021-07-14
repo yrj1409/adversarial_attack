@@ -297,8 +297,8 @@ class Nattack(Attacker):
 
 
 class DIM(Attacker):
-    def __init__(self, eps, steps, step_size, momentum, prob=0.5, clip_min=0.0, clip_max=1.0, device=torch.device('cpu'), low=200,
-                 high=224):
+    def __init__(self, eps, steps, step_size, momentum, prob=0.5, clip_min=0.0, clip_max=1.0,
+                 device=torch.device('cpu'), low=200, high=224):
         super(DIM, self).__init__(eps=eps, clip_min=clip_min, clip_max=clip_max, device=device)
         if steps == 0:
             self.steps = int(min(eps * 255 + 4, eps * 255 * 1.25))
@@ -341,19 +341,52 @@ class DIM(Attacker):
             adv_t.clamp_(self.clip_min, self.clip_max)
 
         return adv_t.squeeze(0).detach()
+# Evading Defenses to Transferable Adversarial Examples by Translation-Invariant Attacks(TIM). ICLR, 2020
+class TIM(Attacker):
+    def __int__(self, eps, steps, step_size, momentum, prob=0.5, clip_min=0.0, clip_max=1.0, device=torch.device('cpu'), low=224,
+                high=240):
+        super(TIM, self).__init__(eps=eps, clip_min=clip_min, clip_max=clip_max, device=device)
+        self.steps = steps
+        self.step_size = step_size
+        self.momentum = momentum
+        self.prob = prob
+        self.low = low
+        self.high = high
+        self.loss_func = F.cross_entropy
+
+    def generate(self, model: nn.Module, x: torch.Tensor, y: torch.Tensor, mean=(0.485, 0.456, 0.406),
+                 std=(0.229, 0.224, 0.225)) -> torch.Tensor:
+        model.eval()
+        nx = torch.unsqueeze(x, 0).to(self.device)
+        ny = torch.unsqueeze(y, 0).to(self.device)
+        nx.requires_grad_(True)
+
+        eta = torch.zeros(nx.shape).to(self.device)
+        adv_t = nx + eta
+        mean = torch.tensor(mean).view(1, 3, 1, 1).to(self.device)
+        std = torch.tensor(std).view(1, 3, 1, 1).to(self.device)
+
+        g = 0
+        for i in range(self.steps):
+            adv_diversity = utils.input_diversity(adv_t, prob=self.prob, low=self.low, high=self.high)
+            adv_normalize = (adv_diversity - mean) / std
+            out = model(adv_normalize)
+
+
+        return adv_t.squeeze(0).detach()
+
 
 
 if __name__ == '__main__':
     import random
+
     net = torchvision.models.resnet50(pretrained=True)
     net.eval()
-    inputs = torch.rand(3,224,224)
-    method = DIM(eps=8.0/255, steps=20, momentum=1, low=320, high=384)
+    inputs = torch.rand(3, 224, 224)
+    method = DIM(eps=8.0 / 255, steps=20, step_size=1.0/255, momentum=1, low=320, high=384)
     y = torch.tensor(random.randint(0, 1000))
     print(y)
     mean = (0.485, 0.456, 0.406)
     std = (0.229, 0.224, 0.225)
     adv = method.generate(net, inputs, y, mean, std)
     print(adv.shape)
-
-
