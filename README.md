@@ -1,2 +1,2 @@
 # adversarial_attack
-some baseline attack methods by pytorch
+some baseline attack methods implemented by pytorch
