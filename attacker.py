@@ -341,11 +341,13 @@ class DIM(Attacker):
             adv_t.clamp_(self.clip_min, self.clip_max)
 
         return adv_t.squeeze(0).detach()
+
+
 # Evading Defenses to Transferable Adversarial Examples by Translation-Invariant Attacks(TIM). ICLR, 2020
-class TIM(Attacker):
-    def __int__(self, eps, steps, step_size, momentum, prob=0.5, clip_min=0.0, clip_max=1.0, device=torch.device('cpu'), low=224,
+class TIDIM(Attacker):
+    def __init__(self, eps, steps, step_size, momentum, prob=0.5, clip_min=0.0, clip_max=1.0, device=torch.device('cpu'), low=224,
                 high=240):
-        super(TIM, self).__init__(eps=eps, clip_min=clip_min, clip_max=clip_max, device=device)
+        super(TIDIM, self).__init__(eps=eps, clip_min=clip_min, clip_max=clip_max, device=device)
         self.steps = steps
         self.step_size = step_size
         self.momentum = momentum
@@ -367,11 +369,30 @@ class TIM(Attacker):
         std = torch.tensor(std).view(1, 3, 1, 1).to(self.device)
 
         g = 0
+
+        #get the conv pre-defined kernel
+        kernel = utils.gkern(15, 3).astype(np.float32)
+        stack_kernel = np.stack([kernel, kernel, kernel])
+        stack_kernel = np.expand_dims(stack_kernel, 1)  #shape: [3, 1, 15, 15]
+        conv_weight = torch.from_numpy(stack_kernel)    #kernel weight for depth_wise convolution
+
         for i in range(self.steps):
             adv_diversity = utils.input_diversity(adv_t, prob=self.prob, low=self.low, high=self.high)
             adv_normalize = (adv_diversity - mean) / std
             out = model(adv_normalize)
+            loss = self.loss_func(out, ny)
+            loss.backward()
 
+            gradient = nx.grad.data
+            # (padding = SAME) in tensorflow
+            ti_gradient = utils.conv2d_same_padding(gradient, weight=conv_weight, stride=1, padding=1)
+            ti_gradient = ti_gradient / torch.mean(torch.abs(ti_gradient), [1, 2, 3], keepdim=True)
+            g = self.momentum * g + ti_gradient
+            eta += self.step_size * torch.sign(g)
+            eta.clamp_(-self.eps, self.eps)
+            nx.grad.data.zero_()
+            adv_t = nx + eta
+            adv_t.clamp_(self.clip_min, self.clip_max)
 
         return adv_t.squeeze(0).detach()
 
@@ -383,8 +404,8 @@ if __name__ == '__main__':
     net = torchvision.models.resnet50(pretrained=True)
     net.eval()
     inputs = torch.rand(3, 224, 224)
-    method = DIM(eps=8.0 / 255, steps=20, step_size=1.0/255, momentum=1, low=320, high=384)
-    y = torch.tensor(random.randint(0, 1000))
+    method = TIDIM(eps=8.0 / 255, steps=20, step_size=1.0/255, momentum=1, low=320, high=384)
+    y = torch.tensor(random.randint(0, 999))
     print(y)
     mean = (0.485, 0.456, 0.406)
     std = (0.229, 0.224, 0.225)

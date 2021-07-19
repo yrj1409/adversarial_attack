@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import random
+import numpy as np
 
 
 class CWLossFunc(nn.Module):
@@ -76,3 +77,32 @@ def input_diversity(image, prob, low=200, high=224):
     padded = F.pad(rescaled, [pad_top, pad_bottom, pad_left, pad_right], 'constant', 0)
     return padded
 
+def gkern(kernlen=21, nsig=3):
+    # get 2d Gaussian kernel array
+    import scipy.stats as st
+    x = np.linspace(-nsig, nsig, kernlen)
+    # get the normal gaussian distribution pdf on x
+    kernel1d = st.norm.pdf(x)
+    kernel_raw = np.outer(kernel1d, kernel1d)
+    kernel = kernel_raw / kernel_raw.sum()
+    return kernel
+
+def conv2d_same_padding(inputs, weight, bias=None, stride=1, padding=1, dilation=1, groups=1):
+    # 函数中padding参数可以无视，实际实现的是padding=same的效果
+    input_rows = inputs.size(2)
+    filter_rows = weight.size(2)
+    effective_filter_size_rows = (filter_rows - 1) * dilation + 1
+    out_rows = (input_rows + stride - 1) // stride
+    padding_rows = max(0, (out_rows - 1) * stride +
+                       (filter_rows - 1) * dilation + 1 - input_rows)
+    rows_odd = (padding_rows % 2 != 0)
+    padding_cols = max(0, (out_rows - 1) * stride +
+                       (filter_rows - 1) * dilation + 1 - input_rows)
+    cols_odd = (padding_rows % 2 != 0)
+
+    if rows_odd or cols_odd:
+        inputs = F.pad(inputs, [0, int(cols_odd), 0, int(rows_odd)])
+
+    return F.conv2d(inputs, weight, bias, stride,
+                    padding=(padding_rows // 2, padding_cols // 2),
+                    dilation=dilation, groups=groups)

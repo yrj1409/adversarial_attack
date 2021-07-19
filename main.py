@@ -1,4 +1,4 @@
-from attacker import DIM, MIM, FGSM, PGD, DeepFool, Nattack, BIM
+from attacker import DIM, MIM, FGSM, PGD, DeepFool, Nattack, BIM, TIDIM
 import random
 import torch
 import torchvision
