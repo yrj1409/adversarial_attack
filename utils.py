@@ -19,6 +19,38 @@ class CWLossFunc(nn.Module):
         return -F.relu(correct_logit - wrong_logit + 50)
 
 
+# ILAP Loss
+class Proj_Loss(nn.Module):
+    def __init__(self):
+        super(Proj_Loss, self).__init__()
+
+    def forward(self, old_attack_mid, new_mid, original_mid, coeff):
+        y1 = (old_attack_mid - original_mid).view(1, -1)
+        y2 = (new_mid - original_mid).view(1, -1)
+        y1_norm = y1 / y1.norm()
+        proj_loss = torch.mm(y2, y1_norm.transpose(0, 1)) / y1.norm()
+        return proj_loss
+
+
+# ILAF Loss
+class Mid_layer_target_Loss(nn.Module):
+    def __init__(self):
+        super(Mid_layer_target_Loss, self).__init__()
+
+    def forward(self, old_attack_mid, new_mid, original_mid, coeff):
+        y1 = (old_attack_mid - original_mid).view(1, -1)
+        y2 = (new_mid - original_mid).view(1, -1)
+        y1_norm = y1 / y1.norm()
+        if (y2 == 0).all():
+            y2_norm = y2
+        else:
+            y2_norm = y2 / y2.norm()
+
+        angle_loss = torch.mm(y1_norm, y2_norm.transpose(0, 1))
+        magnitude_gain = y2.norm() / y1.norm()
+        return angle_loss + magnitude_gain * coeff
+
+
 def nattack_loss(inputs, targets, device):
     batch_size = inputs.shape[0]
     losses = torch.zeros(batch_size).to(device)

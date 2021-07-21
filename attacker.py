@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import numpy as np
 
 import utils
-from utils import CWLossFunc, nattack_loss
+from utils import CWLossFunc, nattack_loss, Proj_Loss, Mid_layer_target_Loss
 
 
 class Attacker:
@@ -345,8 +345,9 @@ class DIM(Attacker):
 
 # Evading Defenses to Transferable Adversarial Examples by Translation-Invariant Attacks(TIM). ICLR, 2020
 class TIDIM(Attacker):
-    def __init__(self, eps, steps, step_size, momentum, prob=0.5, clip_min=0.0, clip_max=1.0, device=torch.device('cpu'), low=224,
-                high=240):
+    def __init__(self, eps, steps, step_size, momentum, prob=0.5, clip_min=0.0, clip_max=1.0,
+                 device=torch.device('cpu'), low=224,
+                 high=240):
         super(TIDIM, self).__init__(eps=eps, clip_min=clip_min, clip_max=clip_max, device=device)
         self.steps = steps
         self.step_size = step_size
@@ -370,11 +371,11 @@ class TIDIM(Attacker):
 
         g = 0
 
-        #get the conv pre-defined kernel
+        # get the conv pre-defined kernel
         kernel = utils.gkern(15, 3).astype(np.float32)
         stack_kernel = np.stack([kernel, kernel, kernel])
-        stack_kernel = np.expand_dims(stack_kernel, 1)  #shape: [3, 1, 15, 15]
-        conv_weight = torch.from_numpy(stack_kernel)    #kernel weight for depth_wise convolution
+        stack_kernel = np.expand_dims(stack_kernel, 1)  # shape: [3, 1, 15, 15]
+        conv_weight = torch.from_numpy(stack_kernel)  # kernel weight for depth_wise convolution
 
         for i in range(self.steps):
             adv_diversity = utils.input_diversity(adv_t, prob=self.prob, low=self.low, high=self.high)
@@ -397,17 +398,85 @@ class TIDIM(Attacker):
         return adv_t.squeeze(0).detach()
 
 
+# The selected intermediate layer for Inc-v3, Incv4, IncRes-v2, Res-101, Res-152 are ‘Mixed6c’,‘feature-9’, ‘mixed6a’,
+# ‘layer3’, ‘layer2’ respectively.
+# Enhancing Adversarial Example Transferability with an Intermediate Level Attack(ILA). ICCV, 2019
+mid_output = None
+
+
+class ILA:
+    def __init__(self, eps, steps, feature_layer, step_size=1.0 / 255, coeff=1.0, clip_min=0.0, clip_max=1.0,
+                 device=torch.device('cpu'), with_projection: bool = True):
+        self.eps = eps
+        self.clip_min = clip_min
+        self.clip_max = clip_max
+        self.device = device
+
+        self.feature_layer = feature_layer
+        self.steps = steps
+        self.step_size = step_size
+        self.coeff = coeff
+        if with_projection:
+            self.loss_func = Proj_Loss()
+        else:
+            self.loss_func = Mid_layer_target_Loss()
+
+    def generate(self, model: nn.Module, x: torch.Tensor, x_attack: torch.Tensor, y: torch.Tensor,
+                 mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)) -> torch.Tensor:
+        # mid_output = None
+
+        def get_mid_output(m, i, o):
+            global mid_output
+            mid_output = o
+
+        model.eval()
+        nx = torch.unsqueeze(x, 0).to(self.device)
+        ny = torch.unsqueeze(y, 0).to(self.device)
+        nx_attack = torch.unsqueeze(x_attack, 0).to(self.device)
+        nx.requires_grad_(True)
+
+        eta = torch.zeros(nx.shape).to(self.device)
+        adv_t = nx + eta
+        mean = torch.tensor(mean).view(1, 3, 1, 1).to(self.device)
+        std = torch.tensor(std).view(1, 3, 1, 1).to(self.device)
+
+        h = self.feature_layer.register_forward_hook(get_mid_output)
+
+        _ = model((nx - mean) / std)
+        mid_original = mid_output.detach().clone()
+
+        _ = model((nx_attack - mean) / std)
+        mid_attack_original = mid_output.detach().clone()
+
+        for i in range(self.steps):
+            adv_normalize = (adv_t - mean) / std
+            out = model(adv_normalize)
+            loss = self.loss_func(mid_attack_original.detach(), mid_output, mid_original.detach(), self.coeff)
+            loss.backward()
+            g = nx.grad.data
+            eta += self.step_size * torch.sign(g)
+            eta.clamp_(-self.eps, self.eps)
+            nx.grad.data.zero_()
+            adv_t = nx + eta
+            adv_t.clamp_(self.clip_min, self.clip_max)
+
+        return adv_t.squeeze(0).detach()
+
 
 if __name__ == '__main__':
     import random
 
     net = torchvision.models.resnet50(pretrained=True)
+    layer = net.layer2
     net.eval()
     inputs = torch.rand(3, 224, 224)
-    method = TIDIM(eps=8.0 / 255, steps=20, step_size=1.0/255, momentum=1, low=320, high=384)
+    method = ILA(eps=16.0/255, steps=10, feature_layer=layer, with_projection=False)
+    print('test ILA')
+    x2 = torch.rand(3, 224, 224)
     y = torch.tensor(random.randint(0, 999))
     print(y)
-    mean = (0.485, 0.456, 0.406)
-    std = (0.229, 0.224, 0.225)
-    adv = method.generate(net, inputs, y, mean, std)
+    m = (0.485, 0.456, 0.406)
+    s = (0.229, 0.224, 0.225)
+    adv = method.generate(net, inputs, x2, y, m, s)
     print(adv.shape)
+

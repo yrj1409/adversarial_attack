@@ -6,7 +6,7 @@ import torchvision
 net = torchvision.models.resnet50(pretrained=True)
 net.eval()
 inputs = torch.rand(3, 224, 224)
-method = DIM(eps=8.0 / 255, steps=20, momentum=1, low=320, high=384)
+method = DIM(eps=8.0 / 255, steps=20, step_size=1./255, momentum=1, low=320, high=384)
 y = torch.tensor(random.randint(0, 1000))
 print(y)
 mean = (0.485, 0.456, 0.406)
