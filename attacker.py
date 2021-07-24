@@ -1,4 +1,4 @@
-# Several methods: FGSM, BIM
+# Several methods: FGSM, BIM, PGD, DeepFool, MIM, Nattack, DIM, TIM, ILA
 
 import torch
 import torchvision
@@ -375,7 +375,7 @@ class TIDIM(Attacker):
         kernel = utils.gkern(15, 3).astype(np.float32)
         stack_kernel = np.stack([kernel, kernel, kernel])
         stack_kernel = np.expand_dims(stack_kernel, 1)  # shape: [3, 1, 15, 15]
-        conv_weight = torch.from_numpy(stack_kernel)  # kernel weight for depth_wise convolution
+        conv_weight = torch.from_numpy(stack_kernel).to(self.device)  # kernel weight for depth_wise convolution
 
         for i in range(self.steps):
             adv_diversity = utils.input_diversity(adv_t, prob=self.prob, low=self.low, high=self.high)
@@ -386,7 +386,7 @@ class TIDIM(Attacker):
 
             gradient = nx.grad.data
             # (padding = SAME) in tensorflow
-            ti_gradient = utils.conv2d_same_padding(gradient, weight=conv_weight, stride=1, padding=1)
+            ti_gradient = utils.conv2d_same_padding(gradient, weight=conv_weight, stride=1, padding=1, groups=3)
             ti_gradient = ti_gradient / torch.mean(torch.abs(ti_gradient), [1, 2, 3], keepdim=True)
             g = self.momentum * g + ti_gradient
             eta += self.step_size * torch.sign(g)
