@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import numpy as np
 
 import utils
-from utils import CWLossFunc, nattack_loss, Proj_Loss, Mid_layer_target_Loss
+from utils import CWLossFunc, nattack_loss, Proj_Loss, Mid_layer_target_Loss, ILAPP_Loss
 
 
 class Attacker:
@@ -406,11 +406,11 @@ mid_output = None
 
 class ILA:
     def __init__(self, eps, steps, feature_layer, step_size=1.0 / 255, coeff=1.0, clip_min=0.0, clip_max=1.0,
-                 device=torch.device('cpu'), with_projection: bool = True):
+                 with_projection: bool = True):
         self.eps = eps
         self.clip_min = clip_min
         self.clip_max = clip_max
-        self.device = device
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         self.feature_layer = feature_layer
         self.steps = steps
@@ -463,6 +463,123 @@ class ILA:
         return adv_t.squeeze(0).detach()
 
 
+# two steps：
+# (1) baseline attack: save mid layer feature and corresponding loss
+# (2) ilapp: apply proj_loss to generate adversarial example
+class ILA_plus_plus:
+    def __init__(self, eps, steps, feature_layer, step_size=1.0 / 255, clip_min=0.0, clip_max=1.0,
+                 device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')):
+        self.device = device
+        self.eps = eps
+        self.steps = steps
+        self.step_size = step_size
+        self.feature_layer = feature_layer
+        self.clip_min = clip_min
+        self.clip_max = clip_max
+
+    def generate(self, model: nn.Module, x: torch.Tensor, y: torch.Tensor, baseline_method=None,
+                 mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)) -> torch.Tensor:
+        w_opt = self.get_w(model, x, y, mean, std)
+        model.eval()
+        model = model.to(self.device)
+        nx = torch.unsqueeze(x, 0).to(self.device)
+        ny = torch.unsqueeze(y, 0).to(self.device)
+        nx.requires_grad_(True)
+        mean = torch.tensor(mean).view(1, 3, 1, 1).to(self.device)
+        std = torch.tensor(std).view(1, 3, 1, 1).to(self.device)
+        eta = torch.zeros(nx.shape).to(self.device)
+        adv_t = nx + eta
+
+        def get_mid_output(m, i, o):
+            global mid_output
+            mid_output = o
+
+        h = self.feature_layer.register_forward_hook(get_mid_output)
+        outputs_original = model((nx - mean) / std)
+        mid_original = mid_output.detach().clone()
+        ori_h_feats = mid_original.data.view(nx.size(0), -1).clone()
+
+        ilaloss = ILAPP_Loss(ori_h_feats=ori_h_feats, guide_feats=w_opt.to(self.device))
+
+        for i in range(self.steps):
+            adv_normalize = (adv_t - mean) / std
+            out = model(adv_normalize)
+            adv_h_feats = mid_output
+            loss = ilaloss(adv_h_feats)
+            print('ILA iter {}, loss {:0.4f}'.format(i, loss.item()))
+            loss.backward()
+            g = nx.grad.data
+            eta += self.step_size * torch.sign(g)
+            eta.clamp_(-self.eps, self.eps)
+            nx.grad.data.zero_()
+            adv_t = nx + eta
+            adv_t.clamp_(self.clip_min, self.clip_max)
+
+        return adv_t.squeeze(0).detach()
+
+    # output: w the shape is same as feature. This will use as a guidance for generating adversarial example.
+    def get_w(self, model: nn.Module, x: torch.Tensor, y: torch.Tensor, mean=(0.485, 0.456, 0.406),
+              std=(0.229, 0.224, 0.225)):
+
+        def get_mid_output(m, i, o):
+            global mid_output
+            mid_output = o
+
+        model.eval()
+        nx = torch.unsqueeze(x, 0).to(self.device)
+        ny = torch.unsqueeze(y, 0).to(self.device)
+        nx.requires_grad_(True)
+        mean = torch.tensor(mean).view(1, 3, 1, 1).to(self.device)
+        std = torch.tensor(std).view(1, 3, 1, 1).to(self.device)
+
+        eta = torch.zeros(nx.shape).to(self.device)
+        adv_t = nx + eta
+
+        h = self.feature_layer.register_forward_hook(get_mid_output)
+        outputs_original = model((nx - mean) / std)
+        mid_original = mid_output.detach().clone()
+        ori_h_feats = mid_original.data.view(nx.size(0), -1).clone()
+
+        loss_ls = []
+        h_feats = torch.zeros(1, self.steps, int(ori_h_feats.numel() / ori_h_feats.shape[0]))
+
+        for i in range(self.steps + 1):
+            adv_normalize = (adv_t - mean) / std
+            out = model(adv_normalize)
+            adv_h_feats = mid_output.detach().clone()
+            adv_h_feats = adv_h_feats.data.view(nx.size(0), -1)
+
+            loss = F.cross_entropy(out, ny)
+            loss.backward()
+
+            eta += self.step_size * torch.sign(nx.grad.data)
+            eta.clamp_(-self.eps, self.eps)
+            nx.grad.data.zero_()
+            adv_t = nx + eta
+            adv_t.clamp_(self.clip_min, self.clip_max)
+
+            if i != 0:
+                h_feats[:, i - 1, :] = adv_h_feats - ori_h_feats
+                loss_ls.append(loss)
+
+        loss_ls = torch.tensor(loss_ls).view(1, self.steps, 1)
+        # loss_ls = torch.cat(loss_ls, dim=0).permute(1, 0).view(1, self.steps, 1)
+
+        # h_feats.shape = [1, steps, layer.feature], loss_ls.shape = [1, steps, 1]
+
+        def calculate_w(H, r, lam, normalize_H: bool = True):
+            if normalize_H:
+                H = H / torch.norm(H, dim=2, keepdim=True)
+            if lam == 'inf':
+                return torch.mean(H * r, dim=1)
+            else:
+                raise NotImplementedError
+
+        w = calculate_w(h_feats, r=loss_ls, lam='inf', normalize_H=True)
+
+        return w.detach().clone()
+
+
 if __name__ == '__main__':
     import random
 
@@ -470,7 +587,7 @@ if __name__ == '__main__':
     layer = net.layer2
     net.eval()
     inputs = torch.rand(3, 224, 224)
-    method = ILA(eps=16.0/255, steps=10, feature_layer=layer, with_projection=False)
+    method = ILA(eps=16.0 / 255, steps=10, feature_layer=layer, with_projection=False)
     print('test ILA')
     x2 = torch.rand(3, 224, 224)
     y = torch.tensor(random.randint(0, 999))
@@ -479,4 +596,3 @@ if __name__ == '__main__':
     s = (0.229, 0.224, 0.225)
     adv = method.generate(net, inputs, x2, y, m, s)
     print(adv.shape)
-

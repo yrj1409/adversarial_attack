@@ -51,6 +51,22 @@ class Mid_layer_target_Loss(nn.Module):
         return angle_loss + magnitude_gain * coeff
 
 
+class ILAPP_Loss(nn.Module):
+    # guide feature shape: [batch_size, n], n is the feature's length
+    def __init__(self, ori_h_feats: torch.Tensor, guide_feats: torch.Tensor):
+        super(ILAPP_Loss, self).__init__()
+        self.batch_size = ori_h_feats.size(0)
+        self.ori_h_feats = ori_h_feats.view(self.batch_size, -1)
+        guide_feats = guide_feats.view(self.batch_size, -1)
+        self.guide_feats = guide_feats / guide_feats.norm(p=2, dim=1, keepdim=True)
+
+    def forward(self, att_h_feats):
+        att_h_feats = att_h_feats.view(self.batch_size, -1)
+        loss = ((att_h_feats - self.ori_h_feats) * self.guide_feats).sum() / self.batch_size
+        return loss
+
+
+
 def nattack_loss(inputs, targets, device):
     batch_size = inputs.shape[0]
     losses = torch.zeros(batch_size).to(device)
