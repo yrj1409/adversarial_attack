@@ -346,8 +346,7 @@ class DIM(Attacker):
 # Evading Defenses to Transferable Adversarial Examples by Translation-Invariant Attacks(TIM). ICLR, 2020
 class TIDIM(Attacker):
     def __init__(self, eps, steps, step_size, momentum, prob=0.5, clip_min=0.0, clip_max=1.0,
-                 device=torch.device('cpu'), low=224,
-                 high=240):
+                 device=torch.device('cpu'), low=224, high=240):
         super(TIDIM, self).__init__(eps=eps, clip_min=clip_min, clip_max=clip_max, device=device)
         self.steps = steps
         self.step_size = step_size
@@ -392,6 +391,85 @@ class TIDIM(Attacker):
             eta += self.step_size * torch.sign(g)
             eta.clamp_(-self.eps, self.eps)
             nx.grad.data.zero_()
+            adv_t = nx + eta
+            adv_t.clamp_(self.clip_min, self.clip_max)
+
+        return adv_t.squeeze(0).detach()
+
+
+# NESTEROV ACCELERATED GRADIENT AND SCALE INVARIANCE FOR ADVERSARIAL ATTACKS. ICLR, 2020.
+class SI_NI_FGSM(Attacker):
+    def __init__(self, eps, steps, step_size, momentum, clip_min=0.0, clip_max=1.0, device=torch.device('cpu')):
+        super(SI_NI_FGSM, self).__init__(eps=eps, clip_min=clip_min, clip_max=clip_max, device=device)
+        self.steps = steps
+        self.step_size = step_size
+        self.momentum = momentum
+        self.loss_func = F.cross_entropy
+
+    def generate(self, model: nn.Module, x: torch.Tensor, y: torch.Tensor, mean=(0.485, 0.456, 0.406),
+                 std=(0.229, 0.224, 0.225)) -> torch.Tensor:
+        model.eval()
+        nx = torch.unsqueeze(x, 0).to(self.device)
+        ny = torch.unsqueeze(y, 0).to(self.device)
+        nx.requires_grad_(True)
+
+        eta = torch.zeros(nx.shape).to(self.device)
+        adv_t = nx + eta
+        mean = torch.tensor(mean).view(1, 3, 1, 1).to(self.device)
+        std = torch.tensor(std).view(1, 3, 1, 1).to(self.device)
+
+        g = 0
+        for i in range(self.steps):
+            x_nes = adv_t + self.momentum * self.step_size * g
+            nes_normalize = (x_nes - mean) / std
+            out = model(nes_normalize)
+            loss = self.loss_func(out, ny)
+            loss.backward(retain_graph=True)
+            gradient = nx.grad.data
+            noise = gradient.clone().detach()
+            nx.grad.data.zero_()
+
+            x_nes_2 = 1 / 2 * x_nes
+            nes_normalize_2 = (x_nes_2 - mean) / std
+            out = model(nes_normalize_2)
+            loss = self.loss_func(out, ny)
+            loss.backward(retain_graph=True)
+            gradient = nx.grad.data
+            noise += gradient.clone().detach()
+            nx.grad.data.zero_()
+
+            x_nes_4 = 1 / 4 * x_nes
+            nes_normalize_4 = (x_nes_4 - mean) / std
+            out = model(nes_normalize_4)
+            loss = self.loss_func(out, ny)
+            loss.backward(retain_graph=True)
+            gradient = nx.grad.data
+            noise += gradient.clone().detach()
+            nx.grad.data.zero_()
+
+            x_nes_8 = 1 / 8 * x_nes
+            nes_normalize_8 = (x_nes_8 - mean) / std
+            out = model(nes_normalize_8)
+            loss = self.loss_func(out, ny)
+            loss.backward(retain_graph=True)
+            gradient = nx.grad.data
+            noise += gradient.clone().detach()
+            nx.grad.data.zero_()
+
+            x_nes_16 = 1 / 16 * x_nes
+            nes_normalize_16 = (x_nes_16 - mean) / std
+            out = model(nes_normalize_16)
+            loss = self.loss_func(out, ny)
+            loss.backward()
+            gradient = nx.grad.data
+            noise += gradient.clone().detach()
+            nx.grad.data.zero_()
+
+            noise = noise / torch.mean(torch.abs(noise), dim=[1, 2, 3], keepdim=True)
+
+            g = self.momentum * g + noise
+            eta += self.step_size * torch.sign(g)
+            eta.clamp_(-self.eps, self.eps)
             adv_t = nx + eta
             adv_t.clamp_(self.clip_min, self.clip_max)
 
@@ -463,6 +541,7 @@ class ILA:
         return adv_t.squeeze(0).detach()
 
 
+# Yet Another Intermediate-Level Attack (ECCV 2020)
 # two steps：
 # (1) baseline attack: save mid layer feature and corresponding loss
 # (2) ilapp: apply proj_loss to generate adversarial example
@@ -563,6 +642,7 @@ class ILA_plus_plus:
                 loss_ls.append(loss)
 
         loss_ls = torch.tensor(loss_ls).view(1, self.steps, 1)
+
         # loss_ls = torch.cat(loss_ls, dim=0).permute(1, 0).view(1, self.steps, 1)
 
         # h_feats.shape = [1, steps, layer.feature], loss_ls.shape = [1, steps, 1]
