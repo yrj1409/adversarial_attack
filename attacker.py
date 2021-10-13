@@ -334,7 +334,7 @@ class DIM(Attacker):
             gradient = nx.grad.data
             g = self.momentum * g + gradient / gradient.norm(p=1)
 
-            eta += torch.sign(g)
+            eta += self.step_size * torch.sign(g)
             eta.clamp_(-self.eps, self.eps)
             nx.grad.data.zero_()
             adv_t = nx + eta
